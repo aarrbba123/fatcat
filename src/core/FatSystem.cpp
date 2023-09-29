@@ -35,7 +35,8 @@ FatSystem::FatSystem(string filename_, unsigned long long globalOffset_, OutputF
       freeClusters(0),
       cacheEnabled(false),
       type(FAT32),
-    rootEntries(0)
+      rootEntries(0),
+      bootfd(-1)
 {
     this->_outputFormat = outputFormat_;
     fd = open(filename.c_str(), O_RDONLY|O_LARGEFILE);
@@ -44,6 +45,45 @@ FatSystem::FatSystem(string filename_, unsigned long long globalOffset_, OutputF
     if (fd < 0) {
         ostringstream oss;
         oss << "! Unable to open the input file: " << filename << " for reading";
+
+        throw oss.str();
+    }
+}
+
+/**
+ * Produces a FAT resource 
+ */
+FatSystem::FatSystem(string filename_, unsigned long long imageSize_, unsigned char mediaDesc_, string bootFilename_, bool useLegacyOEM = false) :
+    strange(0),
+    filename(filename_),
+    globalOffset(0),
+    totalSize(imageSize_),
+    listDeleted(false),
+    statsComputed(false),
+    freeClusters(0),
+    cacheEnabled(false),
+    type(FAT32),
+    rootEntries(0),
+    mediaDescriptor(mediaDesc_),
+    oemName((useLegacyOEM ? "MSWIN4.1" : FATCAT_OEM))
+{
+    if (bootFilename_ != (string)NULL) {
+        bootfd = open(bootFilename_.c_str(), O_RDWR);
+        if (bootfd < 0) {
+            ostringstream oss;
+            oss << "! Unable to open the input bootloader file: " << filename << " for reading";
+
+            throw oss.str();
+        }
+    } else {
+        bootfd = -1;
+    }
+    fd = open(filename.c_str(), O_RDWR|O_LARGEFILE);
+    writeMode = true;
+
+    if (fd < 0) {
+        ostringstream oss;
+        oss << "! Unable to open the input file: " << filename << " for writing";
 
         throw oss.str();
     }
@@ -79,6 +119,8 @@ void FatSystem::enableWrite()
 FatSystem::~FatSystem()
 {
     close(fd);
+    if (bootfd != -1)
+        close(bootfd);
 }
 
 /**
@@ -213,6 +255,7 @@ unsigned int FatSystem::nextCluster(unsigned int cluster, int fat)
     if (cacheEnabled) {
         return cache[cluster];
     }
+
 
     readData(fatStart+fatSize*fat+(bits*cluster)/8, buffer, bytes);
 
@@ -878,7 +921,7 @@ void FatSystem::rewriteUnallocated(bool random)
             __try
             {
 #endif
-            for (int i=0; i<sizeof(buffer); i++) {
+            for (int i=0; i<bytesPerCluster; i++) {
                 if (random) {
                     buffer[i] = rand()&0xff;
                 } else {
@@ -886,7 +929,9 @@ void FatSystem::rewriteUnallocated(bool random)
                 }
             }
 
+
             writeData(clusterAddress(cluster), buffer, bytesPerCluster);
+
             total++;
 #ifdef __WIN__
             }
@@ -899,4 +944,141 @@ void FatSystem::rewriteUnallocated(bool random)
 }
 
 cout << "Scrambled " << total << " sectors" << endl;
+}
+
+void FatSystem::produceFAT(string bootFilename) {
+    #ifdef __WIN__
+    char* buffer = new char[512];
+    #else
+    char buffer[512];
+    #endif
+    dataSize = totalSize - 512;
+    totalSectors = dataSize / 512;
+    // = BPB =
+
+    buffer[0] = 0xEB; buffer[1] = 0x3C; buffer[2] = 0x90;
+    // OEM Name
+    writeSOffset(buffer, FAT_DISK_OEM, FAT_DISK_OEM_SIZE, oemName);
+    // Bytes per sector
+    buffer[FAT_BYTES_PER_SECTOR] = bytesPerSector & 0xff; buffer[FAT_BYTES_PER_SECTOR + 1] = (bytesPerSector >> 8) & 0xff;
+    // Sectors per cluster
+    buffer[FAT_SECTORS_PER_CLUSTER] = sectorsPerCluster & 0xff;
+    // Reserved
+    buffer[FAT_RESERVED_SECTORS] = 1;
+    // Number of FATs
+    buffer[FAT_FATS] = 2;
+    // Number of Root Directory Entries (FAT 12/16)
+    if (type == FAT12 || type == FAT16)
+        buffer[FAT16_ROOT_ENTRIES] = 224;
+    // Total sector size (FAT 12/16)
+    if ((type == FAT12 || type == FAT16) && totalSectors <= 65535)
+    {
+        buffer[FAT16_TOTAL_SECTORS] = totalSectors & 0xff; buffer[FAT16_TOTAL_SECTORS + 1] = (totalSectors >> 8) & 0xff;
+    }
+    // Media Descriptor Type
+    buffer[FAT_MEDIA_DESC_TYPE] = mediaDescriptor;
+    // Number of Sectors (FAT 12/16)
+    if (type == FAT12 || type == FAT16)
+        buffer[FAT_SECTORS_PER_FAT] = 9;
+    // Number of sectors/heads per track (AKA disk geometry)
+    if (mediaDescriptor == MEDIA_FLOPPY_35MM)
+    {
+        buffer[0x18] = 18; buffer[0x1A] = 80;
+    }
+    // Large sector count
+    if (type == FAT32 || totalSectors > 65535) {
+        buffer[FAT_TOTAL_SECTORS] = totalSectors & 0xff; buffer[FAT_TOTAL_SECTORS + 1] = (totalSectors >> 8) & 0xff;
+        buffer[FAT_TOTAL_SECTORS + 2] = (totalSectors >> 16) & 0xff; buffer[FAT_TOTAL_SECTORS + 3] = (totalSectors >> 24) & 0xff;
+    }
+    // = EBR =
+    if (type == FAT12 || type == FAT16) {
+        // Drive number
+        if (mediaDescriptor != MEDIA_FLOPPY_35MM)
+            buffer[0x24] = 0x80;
+        // FAT Signature
+        buffer[0x26] = 0x29;
+        // Volume label
+        writeSOffset(buffer, 0x2B, 11, diskLabel);
+        // System Identifier
+        if (type == FAT12)
+            writeSOffset(buffer, 0x36, 8, "FAT12");
+        else
+            writeSOffset(buffer, 0x36, 8, "FAT16");
+        // Boot code
+        if (bootfd != -1) {
+            lseek64(bootfd, 0l, SEEK_END);
+            unsigned long long size = tell(bootfd);
+            lseek64(bootfd, 0l, SEEK_SET);
+            if (size < 448) {
+                string bootData;
+                bootData.reserve(size);
+                read(bootfd, &bootData, size);
+                writeSOffset(buffer, 0x3E, size, bootData, '\0');
+            } else {
+                ostringstream oss;
+                oss << "! Bootloader file " << bootFilename << " size is too large!";
+
+                throw oss.str();
+            }
+        }
+        // Signature
+        buffer[0x1FE] = 0x55; buffer[0x1FF] = 0xAA;
+            
+    } 
+    else {
+        // Sectors per FAT
+        // TODO: Find out how to calculate sectors per FAT
+        // Root Directory Cluster Num
+        buffer[FAT_ROOT_DIRECTORY] = 2;
+        // FSInfo Sector Num
+        buffer[0x30] = 1;
+        // Backup boot sector Num
+        buffer[0x32] = 2;
+        // Drive number
+        if (mediaDescriptor != MEDIA_FLOPPY_35MM)
+            buffer[0x40] = 0x80;
+        // Signature
+        buffer[0x42] = 0x28;
+        // Volume Label
+        writeSOffset(buffer, FAT_DISK_LABEL, FAT_DISK_LABEL_SIZE, diskLabel);
+        // System Identifier
+        writeSOffset(buffer, FAT_DISK_FS, FAT16_DISK_FS_SIZE, "FAT32");
+        // Boot Code
+        if (bootfd != -1) {
+            lseek64(bootfd, 0l, SEEK_END);
+            unsigned long long size = tell(bootfd);
+            lseek64(bootfd, 0l, SEEK_SET);
+            // (nice)
+            if (size < 420) {
+                string bootData;
+                bootData.reserve(size);
+                read(bootfd, &bootData, size);
+                writeSOffset(buffer, 0x3E, size, bootData, '\0');
+            } else {
+                ostringstream oss;
+                oss << "! Bootloader file " << bootFilename << " size is too large!";
+
+                throw oss.str();
+            }
+        }
+        // MBR Signature
+        buffer[0x1FE] = 0x55; buffer[0x1FF] = 0xAA;
+    }
+
+    // Flush Buffer
+    writeData(0, buffer, 512);
+
+    #ifdef __WIN__
+    delete[] buffer;
+    #endif
+}
+
+void FatSystem::writeSOffset(char *buffer, unsigned int offset, unsigned int size, string word, char fill = ' ') {
+    for (int i = offset, x = 0; i < offset + size; i++) {
+        if (x < word.size())
+            buffer[i] = word[x];
+        else
+            buffer[i] = fill;
+        x++;
+    }
 }

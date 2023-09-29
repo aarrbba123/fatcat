@@ -30,6 +30,7 @@ using namespace std;
 #define FAT_SECTORS_PER_CLUSTER     0x0d
 #define FAT_RESERVED_SECTORS        0x0e
 #define FAT_FATS                    0x10
+#define FAT_MEDIA_DESC_TYPE         0x15
 #define FAT_TOTAL_SECTORS           0x20
 #define FAT_SECTORS_PER_FAT         0x24
 #define FAT_ROOT_DIRECTORY          0x2c
@@ -50,8 +51,15 @@ using namespace std;
 #define FAT16_TOTAL_SECTORS         0x13
 #define FAT16_ROOT_ENTRIES          0x11
 
-#define FAT32 0
-#define FAT16 1
+#define FAT32                       0
+#define FAT16                       1
+#define FAT12                       2
+
+// Media Descriptor
+#define MEDIA_FLOPPY_35MM           0xF0
+#define MEDIA_HARD_DISK             0xF8
+
+#define FATCAT_OEM                  "FATCATFS"
 
 /**
  * A FAT fileSystem
@@ -60,6 +68,7 @@ class FatSystem
 {
 public:
     FatSystem(string filename, unsigned long long globalOffset = 0, OutputFormatType outputFormat = Default);
+    FatSystem(string filename, unsigned long long imageSize, unsigned char mediaDescriptor, string bootFilename = NULL, bool useLegacyOEM = false);
     ~FatSystem();
 
     /**
@@ -117,11 +126,15 @@ public:
     int fd;
     bool writeMode;
 
+    // For bootloader
+    int bootfd;
+
     // Header values
     int type;
     string diskLabel;
     string oemName;
     string fsType;
+    unsigned char mediaDescriptor;
     unsigned long long totalSectors;
     unsigned long long bytesPerSector;
     unsigned long long sectorsPerCluster;
@@ -130,6 +143,7 @@ public:
     unsigned long long sectorsPerFat;
     unsigned long long rootDirectory;
     unsigned long long reserved;
+    // Wonder what this is.
     unsigned long long strange;
     unsigned int bits;
 
@@ -210,6 +224,18 @@ public:
 
 protected:
     void parseHeader();
+    void produceFAT(string bootFilename);
+
+    /**
+     * @brief Write a string onto the buffer, Offsetted by offset
+     * 
+     * @param buffer Buffer to write to
+     * @param offset Self-explanatory
+     * @param size The size of the buffer
+     * @param word The string to write
+     * @param fill The character to fill empty spaces with
+     */
+    void writeSOffset(char *buffer, unsigned int offset, unsigned int size, string word, char fill);
 
     /**
          * Compute the free clusters stats
