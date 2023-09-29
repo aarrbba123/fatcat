@@ -256,13 +256,8 @@ unsigned int FatSystem::nextCluster(unsigned int cluster, int fat)
         return cache[cluster];
     }
 
-    cout << "Buffer Size: " << sizeof(*buffer) << " (" << bytes << ")" << endl;
 
-    #ifdef __WIN__
     readData(fatStart+fatSize*fat+(bits*cluster)/8, buffer, bytes);
-    #else
-    readData(fatStart+fatSize*fat+(bits*cluster)/8, buffer, sizeof(buffer));
-    #endif
 
     unsigned int next;
 
@@ -933,11 +928,10 @@ void FatSystem::rewriteUnallocated(bool random)
                     buffer[i] = 0x0;
                 }
             }
-            #ifndef __WIN__
-            writeData(clusterAddress(cluster), buffer, sizeof(buffer));
-            #else
+
+
             writeData(clusterAddress(cluster), buffer, bytesPerCluster);
-            #endif
+
             total++;
 #ifdef __WIN__
             }
